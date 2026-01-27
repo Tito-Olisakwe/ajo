@@ -20,3 +20,4 @@ contract DeployAjo is Script {
 }
 
 // forge script script/Deploy.s.sol --rpc-url "$ANVIL_RPC_URL" --broadcast
+// 0x2279B7A0a67DB372996a5FaB50D91eAA73d2eBe6
