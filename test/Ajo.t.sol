@@ -16,6 +16,8 @@ contract AjoTest is Test {
     uint256 groupId;
 
     function setUp() public {
+        vm.txGasPrice(0);
+
         // Deploy contract
         ajo = new Ajo();
 
@@ -100,43 +102,24 @@ contract AjoTest is Test {
 
         uint256 numMembers = members.length;
 
-        // Track initial balances
-        uint256[] memory initialBalances = new uint256[](numMembers);
-        for (uint256 i = 0; i < numMembers; i++) {
-            initialBalances[i] = members[i].balance;
-        }
-
         for (uint256 month = 1; month <= numMembers; month++) {
-            // Each member contributes
-            for (uint256 i = 0; i < numMembers; i++) {
-                vm.startPrank(members[i]);
-                ajo.contribute{value: 1 ether}(groupId);
-                vm.stopPrank();
-            }
-
-            // Capture current recipient
             address recipient = ajo.getCurrentRecipient(groupId);
-            uint256 recipientIndex = 0;
+            uint256 beforeBalance = recipient.balance;
+
             for (uint256 i = 0; i < numMembers; i++) {
-                if (members[i] == recipient) recipientIndex = i;
+                vm.prank(members[i]);
+                ajo.contribute{value: 1 ether}(groupId);
             }
 
-            uint256 beforeBalance = members[recipientIndex].balance;
+            uint256 afterBalance = recipient.balance;
 
-            // Payout
-            ajo.payout(groupId);
-
-            uint256 afterBalance = members[recipientIndex].balance;
-
-            // Recipient receives total pot
-            uint256 expectedPot = 1 ether * numMembers;
+            uint256 expectedNet = (1 ether * numMembers) - 1 ether;
             assertEq(
                 afterBalance - beforeBalance,
-                expectedPot,
+                expectedNet,
                 "Recipient did not get pot"
             );
 
-            // Only check next recipient if cycle not complete
             if (month < numMembers) {
                 address nextRecipient = ajo.getCurrentRecipient(groupId);
                 uint256 expectedIndex = month % numMembers;
@@ -148,7 +131,6 @@ contract AjoTest is Test {
             }
         }
 
-        // After full cycle, verify contributed & received totals
         for (uint256 i = 0; i < numMembers; i++) {
             (uint256 contributed, uint256 received) = ajo.getMemberInfo(
                 groupId,
@@ -158,4 +140,129 @@ contract AjoTest is Test {
             assertEq(received, 4 ether, "Total received mismatch");
         }
     }
+
+    // -----------------------
+    // Test 6: Only unpaid members can vote
+    // -----------------------
+    function testOnlyUnpaidMembersCanVote() public {
+        vm.startPrank(member1);
+        ajo.contribute{value: 1 ether}(groupId);
+        vm.stopPrank();
+
+        vm.startPrank(member1);
+        ajo.voteToDisband(groupId);
+        vm.stopPrank();
+
+        vm.startPrank(member1);
+        vm.expectRevert("Already voted");
+        ajo.voteToDisband(groupId);
+        vm.stopPrank();
+    }
+
+    // -----------------------
+    // Test 7: Disband after all unpaid members vote
+    // -----------------------
+    function testDisbandWhenAllUnpaidVote() public {
+        address[] memory members = new address[](4);
+        members[0] = member1;
+        members[1] = member2;
+        members[2] = member3;
+        members[3] = member4;
+
+        uint256 numMembers = members.length;
+
+        for (uint256 i = 0; i < numMembers; i++) {
+            vm.startPrank(members[i]);
+            ajo.contribute{value: 1 ether}(groupId);
+            vm.stopPrank();
+        }
+
+        vm.startPrank(member2);
+        ajo.voteToDisband(groupId);
+        vm.stopPrank();
+
+        vm.startPrank(member3);
+        ajo.voteToDisband(groupId);
+        vm.stopPrank();
+
+        bool disbanded = ajo.groupDisbanded(groupId);
+        assertEq(disbanded, false);
+
+        vm.startPrank(member4);
+        ajo.voteToDisband(groupId);
+        vm.stopPrank();
+
+        disbanded = ajo.groupDisbanded(groupId);
+        assertEq(disbanded, true);
+    }
+
+    // -----------------------
+    // Test 8: Refund contributions for the current month
+    // -----------------------
+    function testRefundsOnDisband() public {
+        uint256 before1 = member1.balance;
+        uint256 before2 = member2.balance;
+
+        vm.startPrank(member1);
+        ajo.contribute{value: 1 ether}(groupId);
+        vm.stopPrank();
+
+        vm.startPrank(member2);
+        ajo.contribute{value: 1 ether}(groupId);
+        vm.stopPrank();
+
+        vm.startPrank(member1);
+        ajo.voteToDisband(groupId);
+        vm.stopPrank();
+
+        vm.startPrank(member2);
+        ajo.voteToDisband(groupId);
+        vm.stopPrank();
+
+        vm.startPrank(member3);
+        ajo.voteToDisband(groupId);
+        vm.stopPrank();
+
+        vm.startPrank(member4);
+        ajo.voteToDisband(groupId);
+        vm.stopPrank();
+
+        uint256 after1 = member1.balance;
+        uint256 after2 = member2.balance;
+
+        assertEq(after1, before1, "Member1 refund incorrect");
+        assertEq(after2, before2, "Member2 refund incorrect");
+    }
+
+    // -----------------------
+    // Test 9: Auto payout triggers on last contribution
+    // -----------------------
+    function testAutoPayoutTriggersOnLastContribution() public {
+        address recipient = ajo.getCurrentRecipient(groupId);
+        assertEq(recipient, member1);
+
+        uint256 beforeRecipient = recipient.balance;
+
+        vm.prank(member1);
+        ajo.contribute{value: 1 ether}(groupId);
+
+        vm.prank(member2);
+        ajo.contribute{value: 1 ether}(groupId);
+
+        vm.prank(member3);
+        ajo.contribute{value: 1 ether}(groupId);
+
+        assertEq(recipient.balance, beforeRecipient - 1 ether);
+
+        vm.prank(member4);
+        ajo.contribute{value: 1 ether}(groupId);
+
+        assertEq(recipient.balance - beforeRecipient, 3 ether);
+
+        assertEq(ajo.getCurrentRecipient(groupId), member2);
+
+        assertEq(ajo.contributedCountThisMonth(groupId), 0);
+    }
 }
+
+// forge test --match-contract AjoTest

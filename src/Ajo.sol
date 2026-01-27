@@ -34,6 +34,9 @@ contract Ajo is Ownable, ReentrancyGuard {
     mapping(uint256 => mapping(address => uint256))
         public totalContributedInGroup;
     mapping(uint256 => mapping(address => uint256)) public totalReceivedInGroup;
+    mapping(uint256 => bool) public groupDisbanded;
+    mapping(uint256 => mapping(address => bool)) public disbandVotes;
+    mapping(uint256 => uint256) public contributedCountThisMonth;
 
     // === Events ===
     event GroupCreated(
@@ -101,6 +104,7 @@ contract Ajo is Ownable, ReentrancyGuard {
     function contribute(uint256 groupId) external payable nonReentrant {
         AjoGroup storage g = groups[groupId];
         require(g.groupId != 0, "Group does not exist");
+        require(!groupDisbanded[groupId], "Group has been disbanded");
 
         require(msg.value == g.contributionAmount, "Incorrect contribution");
 
@@ -122,11 +126,22 @@ contract Ajo is Ownable, ReentrancyGuard {
         totalContributedInGroup[groupId][msg.sender] += msg.value;
 
         emit ContributionMade(groupId, msg.sender, msg.value);
+
+        contributedCountThisMonth[groupId] += 1;
+
+        if (contributedCountThisMonth[groupId] == g.members.length) {
+            _payout(groupId);
+        }
     }
 
     function payout(uint256 groupId) external nonReentrant {
+        _payout(groupId);
+    }
+
+    function _payout(uint256 groupId) internal {
         AjoGroup storage g = groups[groupId];
         require(g.groupId != 0, "Group does not exist");
+        require(!groupDisbanded[groupId], "Group has been disbanded");
 
         uint256 memberCount = g.members.length;
         require(g.currentMonth <= memberCount, "Cycle already completed");
@@ -150,12 +165,55 @@ contract Ajo is Ownable, ReentrancyGuard {
             g.contributionsThisMonth[g.members[i]] = 0;
         }
 
+        contributedCountThisMonth[groupId] = 0;
+
         (bool success, ) = recipient.call{value: totalPot}("");
         require(success, "Transfer failed");
 
         emit PayoutDone(groupId, recipient, totalPot);
 
         g.currentMonth += 1;
+    }
+
+    function voteToDisband(uint256 groupId) external nonReentrant {
+        AjoGroup storage g = groups[groupId];
+        require(g.groupId != 0, "Group does not exist");
+        require(!groupDisbanded[groupId], "Group already disbanded");
+
+        require(
+            totalReceivedInGroup[groupId][msg.sender] == 0,
+            "Already received payout; cannot vote"
+        );
+        require(!disbandVotes[groupId][msg.sender], "Already voted");
+
+        disbandVotes[groupId][msg.sender] = true;
+
+        bool allUnpaidVoted = true;
+        for (uint256 i = 0; i < g.members.length; i++) {
+            address m = g.members[i];
+            if (
+                totalReceivedInGroup[groupId][m] == 0 &&
+                !disbandVotes[groupId][m]
+            ) {
+                allUnpaidVoted = false;
+                break;
+            }
+        }
+
+        if (allUnpaidVoted) {
+            groupDisbanded[groupId] = true;
+            contributedCountThisMonth[groupId] = 0;
+
+            for (uint256 i = 0; i < g.members.length; i++) {
+                address m = g.members[i];
+                uint256 contributed = g.contributionsThisMonth[m];
+                if (contributed > 0) {
+                    g.contributionsThisMonth[m] = 0;
+                    (bool success, ) = m.call{value: contributed}("");
+                    require(success, "Refund failed");
+                }
+            }
+        }
     }
 
     // === View Functions ===
