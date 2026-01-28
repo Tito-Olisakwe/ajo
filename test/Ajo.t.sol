@@ -264,5 +264,3 @@ contract AjoTest is Test {
         assertEq(ajo.contributedCountThisMonth(groupId), 0);
     }
 }
-
-// forge test --match-contract AjoTest
